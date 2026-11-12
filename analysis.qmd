@@ -13,3 +13,119 @@ library(purrr)
 library(leaflet)
 library(jsonlite)
 ```
+
+## Exercise 3
+
+```{r}
+raw <- fromJSON("data/wildfires.geojson", simplifyVector = FALSE)
+
+first_fire <- raw$features[[1]]
+names(first_fire)
+
+first_fire$geometry$coordinates[[1]][[1]]
+```
+
+```{r}
+#| cache: true
+wildfires <- tibble(features = raw$features) |>
+  unnest_wider(features) |>
+  unnest_wider(properties)
+
+print(wildfires)
+
+fires <- wildfires |>
+  unnest_wider(geometry, names_sep = "_") |>
+  select(incident, gis_acres, fire_year, agency, state, geometry_coordinates) |>
+  mutate(
+    gis_acres = as.numeric(gis_acres),
+    fire_year = as.integer(fire_year)
+  )
+```
+
+```{r}
+#| cache: true
+big_fires <- fires |>
+  filter(gis_acres >= 100000) |>
+  mutate(
+    lon = map_dbl(
+      geometry_coordinates,
+      \(rings) mean(map_dbl(rings[[1]], \(point) point[[1]]))
+    ),
+    lat = map_dbl(
+      geometry_coordinates,
+      \(rings) mean(map_dbl(rings[[1]], \(point) point[[2]]))
+    )
+  )
+```
+
+```{r}
+largest_fires <- big_fires |>
+  slice_max(gis_acres, n = 10, with_ties = FALSE) |>
+  mutate(
+    popup = paste0(
+      "<strong>", incident, "</strong><br>",
+      "Year: ", fire_year, "<br>",
+      "Acres: ", scales::comma(gis_acres)
+    )
+  )
+
+largest_fire_geometries <- map(
+  largest_fires$geometry_coordinates,
+  \(rings) sf::st_polygon(
+    map(rings, \(ring) do.call(rbind, map(ring, unlist)))
+  )
+)
+
+largest_fires_sf <- sf::st_sf(
+  largest_fires |> select(-geometry_coordinates),
+  geometry = sf::st_sfc(largest_fire_geometries, crs = 4326)
+)
+
+fire_bounds <- sf::st_bbox(largest_fires_sf)
+
+leaflet(largest_fires_sf) |>
+  addTiles() |>
+  addPolygons(popup = ~popup) |>
+  fitBounds(
+    lng1 = fire_bounds[["xmin"]],
+    lat1 = fire_bounds[["ymin"]],
+    lng2 = fire_bounds[["xmax"]],
+    lat2 = fire_bounds[["ymax"]]
+  )
+```
+
+## Search and rank fires
+
+```{r}
+august_fires <- fires |>
+  filter(str_detect(incident, regex("\\bAugust\\b", ignore_case = TRUE)))
+
+nrow(august_fires)
+
+fires |>
+  slice_max(gis_acres, n = 10, with_ties = FALSE) |>
+  select(incident, gis_acres)
+```
+
+## Acres burned by state
+
+```{r}
+acres_by_state <- fires |>
+  filter(!is.na(state)) |>
+  group_by(state) |>
+  summarise(total_acres = sum(gis_acres, na.rm = TRUE), .groups = "drop")
+
+top_states <- acres_by_state |>
+  slice_max(total_acres, n = 10, with_ties = FALSE) |>
+  mutate(state = fct_reorder(state, total_acres))
+
+ggplot(top_states, aes(x = state, y = total_acres)) +
+  geom_col() +
+  coord_flip() +
+  labs(
+    title = "Top 10 States by Acres Burned",
+    x = "State",
+    y = "Total acres burned",
+    caption = "Total reported fire acreage by state in wildfires.geojson."
+  )
+```
